@@ -1,0 +1,14 @@
+# Exclude bulky raw data to keep deploys fast.
+**/*.tar.gz
+**/*.tsv.gz
+
+# Keep deterministic demo subsets and precomputed artifacts
+!data/demo_artifacts/**
+!data/precomputed/**
+
+# Allow small validation files for plotting in the app
+!data/validation_datasets/blood_expr.tsv
+!data/validation_datasets/cytometry_df.tsv
+
+# Notebooks not needed for the app
+*.ipynb
