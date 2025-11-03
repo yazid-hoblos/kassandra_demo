@@ -262,18 +262,23 @@ elif tab == "Training models":
                         gc.collect()
                     except Exception as e:
                         st.error(f"Quick training failed: {e}")
-
-                st.write("You can now run Validation step to predict on sample data.")
             finally:
                 try:
                     TRAIN_LOCK.release()
                 except Exception:
                     pass
 
-    # Note: Loading a precomputed model from disk is intentionally disabled in the hosted demo
-    # because large model files can fail to load reliably in constrained/cloud environments.
-    # To use a precomputed model, copy `data/precomputed/model.joblib` into the repo locally
-    # and run the notebook workflow instead.
+            # Show next step message after training completes
+            if st.session_state.get("model") is not None:
+                st.success("✅ Model ready! You can now run Validation step to predict on sample data.")
+
+    # Guidance about precomputed models and running full training locally
+    with st.expander("ℹ️ About training in this demo"):
+        st.markdown(
+            "- **Lite mode** (enabled on Render): Uses tiny LightGBM models (~100 estimators) and caps num_points to ~50 to fit 512MB RAM.\n"
+            "- **For full training**: Run locally with higher num_points (500-2000) and the standard boosting params, or upgrade your Render plan.\n"
+            "- **Concurrent users**: Training is serialized; only one runs at a time to prevent crashes."
+        )
 
 elif tab == "Validation":
     st.header("4. Validation")
