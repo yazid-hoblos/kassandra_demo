@@ -21,7 +21,7 @@ from core.plotting import print_all_cells_in_one, print_cell_matras, cells_p
 
 st.set_page_config(page_title="Kassandra demo", layout="wide")
 
-st.title("Kassandra — Presentation demo (guided)")
+st.title("Kassandra — Presentation demo")
 # with st.expander("About this demo", expanded=True):
 #     st.markdown(
 #         "- Mirrors the same steps as `Model Training.ipynb` with lighter, deterministic subsets for speed.\n"
@@ -82,7 +82,7 @@ def quiet():
     return contextlib.redirect_stdout(new_stdout), contextlib.redirect_stderr(new_stderr)
 
 
-tab = st.sidebar.radio("Step", ["Data curation", "Training data", "Training models", "Validation"])
+tab = st.sidebar.radio("Step", ["Data curation", "Artificial Transcriptomes", "Model Training", "Validation"])
 
 # Keep state across tabs/reruns
 if "model" not in st.session_state:
@@ -127,9 +127,9 @@ if tab == "Data curation":
 
     # st.markdown("**Note:** For the full cleaning step the notebook uses `tr_to_genes` and `renorm_expressions` (see `core/utils.py`).")
 
-elif tab == "Training data":
+elif tab == "Artificial Transcriptomes":
     st.header("2. Training data (artificial transcriptomes generation)")
-    st.write("Generate pseudobulk (artificial transcriptomes) using `Mixer`. Use small parameters in live demo.")
+    st.write("Generate pseudobulk (artificial transcriptomes) using `Mixer`.")
 
     quick = st.checkbox("Quick demo mode", value=True)
     num_points = st.number_input("num_points", min_value=10, max_value=10000, value=100)
@@ -182,9 +182,9 @@ elif tab == "Training data":
     except FileNotFoundError as e:
         st.error(f"Cell types config or data missing: {e}")
 
-elif tab == "Training models":
+elif tab == "Model Training":
     st.header("3. Training models")
-    st.write("Train lightweight models on generated pseudobulks (quick demo). Precomputed model loading has been removed from this demo for reliability in hosted environments.")
+    st.write("Train lightweight models on generated pseudobulks (quick demo).")
     quick_default = True
     lite = is_lite_env()
     if lite:
@@ -256,7 +256,7 @@ elif tab == "Training models":
 
 elif tab == "Validation":
     st.header("4. Validation")
-    st.write("Run prediction on a validation dataset (and plot like in the notebook) or show precomputed metrics/plots/predictions.")
+    st.write("Run prediction on a validation dataset or show precomputed metrics.")
     option = st.radio("Mode", ["Run quick prediction", "Show precomputed metrics and plots"]) 
 
     if option == "Run quick prediction":
@@ -322,7 +322,7 @@ elif tab == "Validation":
                             # Align cytof to prediction columns if needed
                             cytof_aligned = cytof_df.loc[preds.index.intersection(cytof_df.index), preds.columns.intersection(cytof_df.columns)]
 
-                            st.subheader("Notebook-like plots")
+                            st.subheader("Validation Plots")
                             # All cells in one scatter
                             fig1, ax1 = plt.subplots()
                             print_all_cells_in_one(preds, cytof_aligned, ax=ax1, pallete=cells_p,
@@ -353,11 +353,12 @@ elif tab == "Validation":
                 ax.legend()
                 st.pyplot(fig)
         else:
-            st.info("No metrics found at data/precomputed/metrics.csv. See data/precomputed/README.md to generate.")
+            st.info("No metrics found at data/precomputed/metrics.csv.")
 
         # Show precomputed plots if present
         if os.path.exists(PRECOMP_PREDS) and os.path.exists(VALIDATION_CYTOF):
             st.subheader("Precomputed visualization")
+            # Load and display plots
             try:
                 preds = pd.read_csv(PRECOMP_PREDS, sep='\t', index_col=0)
                 cytof_df = pd.read_csv(VALIDATION_CYTOF, sep='\t', index_col=0)
@@ -380,22 +381,22 @@ elif tab == "Validation":
                                       subplot_ncols=4, ticks_size=12, wspace=0.4, hspace=0.5,
                                       min_xlim=0, min_ylim=0)
                 st.pyplot(plt.gcf())
-                
-                # Save plots for future use
-                plt.figure(fig1.number)
-                plt.savefig(os.path.join(PRECOMP_PLOTS_DIR, 'all_cells_scatter.png'), bbox_inches='tight')
-                plt.figure(axs[0,0].figure.number)
-                plt.savefig(os.path.join(PRECOMP_PLOTS_DIR, 'cell_correlation_matrix.png'), bbox_inches='tight')
-                
             except Exception as e:
                 st.error(f"Could not generate precomputed plots: {e}")
-                
-                # Fallback to saved PNGs if available
-                pngs = sorted(glob.glob(os.path.join(PRECOMP_PLOTS_DIR, "*.png")))
-                if pngs:
-                    st.subheader("Saved precomputed plots")
-                    for p in pngs:
-                        st.image(p, caption=os.path.basename(p), use_column_width=True)
+            
+            # Try to save plots for future use, but don't fail UI if saving fails
+            if 'fig1' in locals():
+                try:
+                    os.makedirs(PRECOMP_PLOTS_DIR, exist_ok=True)
+                    with contextlib.suppress(Exception):
+                        plt.figure(fig1.number)
+                        plt.savefig(os.path.join(PRECOMP_PLOTS_DIR, 'all_cells_scatter.png'), bbox_inches='tight')
+                    with contextlib.suppress(Exception):
+                        target_fig = axs[0,0].figure if hasattr(axs, '__getitem__') else plt.gcf()
+                        plt.figure(target_fig.number)
+                        plt.savefig(os.path.join(PRECOMP_PLOTS_DIR, 'cell_correlation_matrix.png'), bbox_inches='tight')
+                except Exception as e:
+                    st.info(f"Displayed plots but couldn't save to {PRECOMP_PLOTS_DIR}: {e}")
                 
         elif os.path.isdir(PRECOMP_PLOTS_DIR):
             # Fallback to just showing saved plots
@@ -418,4 +419,4 @@ elif tab == "Validation":
 
 # Footer
 st.markdown("---")
-st.caption("This guided demo mirrors the notebook. For heavy steps it uses deterministic small subsets or precomputed artifacts to stay responsive.")
+st.caption("For heavy steps deterministic small subsets or precomputed artifacts are used to maintain responsiveness.")
