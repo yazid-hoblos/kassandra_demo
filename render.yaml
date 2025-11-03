@@ -12,3 +12,5 @@ services:
         value: 3.10.13
       - key: STREAMLIT_BROWSER_GATHER_USAGE_STATS
         value: "false"
+      - key: KASSANDRA_LITE
+        value: "1"

@@ -8,6 +8,10 @@ import time
 import os
 import glob
 import joblib
+import sys
+import pickle
+import warnings
+import gc
 
 from core.cell_types import CellTypes
 from core.mixer import Mixer
@@ -18,12 +22,12 @@ from core.plotting import print_all_cells_in_one, print_cell_matras, cells_p
 st.set_page_config(page_title="Kassandra demo", layout="wide")
 
 st.title("Kassandra — Presentation demo (guided)")
-with st.expander("About this demo", expanded=True):
-    st.markdown(
-        "- Mirrors the same steps as `Model Training.ipynb` with lighter, deterministic subsets for speed.\n"
-        "- You can either run a quick pipeline on small real-data slices or show precomputed, full-results artifacts.\n"
-        "- Plots are generated like in the notebook (scatter of all cells and per-cell matrices) when running predictions."
-    )
+# with st.expander("About this demo", expanded=True):
+#     st.markdown(
+#         "- Mirrors the same steps as `Model Training.ipynb` with lighter, deterministic subsets for speed.\n"
+#         "- You can either run a quick pipeline on small real-data slices or show precomputed, full-results artifacts.\n"
+#         "- Plots are generated like in the notebook (scatter of all cells and per-cell matrices) when running predictions."
+#     )
 
 # Paths to the real repo data used by the notebook (may be large)
 CELLS_EXPR = "data/cells_expr.tsv.tar.gz"
@@ -49,6 +53,27 @@ PRECOMP_MODEL = os.path.join(PRECOMP_DIR, "model.joblib")
 PRECOMP_METRICS = os.path.join(PRECOMP_DIR, "metrics.csv")
 PRECOMP_PREDS = os.path.join(PRECOMP_DIR, "predictions_blood.tsv")
 PRECOMP_PLOTS_DIR = os.path.join(PRECOMP_DIR, "plots")
+
+# Lite-mode boosting params (tiny models for 512MB instances)
+LITE_BP_DIR = "configs/boosting_params_lite"
+LITE_BP1 = os.path.join(LITE_BP_DIR, "lgb_parameters_first_step.tsv")
+LITE_BP2 = os.path.join(LITE_BP_DIR, "lgb_parameters_second_step.tsv")
+
+
+def is_lite_env() -> bool:
+    """Detect low-memory environment (e.g., Render free) and force lite mode."""
+    # Render sets a few env vars; also allow explicit opt-in via KASSANDRA_LITE
+    return bool(os.environ.get("KASSANDRA_LITE") or os.environ.get("RENDER") or os.environ.get("RENDER_EXTERNAL_URL"))
+
+
+@st.cache_data(show_spinner=False)
+def load_tsv(path: str, index_col=0, nrows=None, dtype="float32"):
+    df = pd.read_csv(path, sep='\t', index_col=index_col, nrows=nrows)
+    # cast numeric frames to float32 to save memory, ignore fails on mixed dtypes
+    try:
+        return df.astype(dtype)
+    except Exception:
+        return df
 
 
 def quiet():
@@ -159,9 +184,16 @@ elif tab == "Training data":
 
 elif tab == "Training models":
     st.header("3. Training models")
-    st.write("Train lightweight models on generated pseudobulks (quick demo) or use a precomputed model for instant results.")
-    quick = st.checkbox("Quick demo training (recommended)", value=True)
-    num_points = st.number_input("num_points for mixer (when generating)", min_value=10, max_value=10000, value=200)
+    st.write("Train lightweight models on generated pseudobulks (quick demo). Precomputed model loading has been removed from this demo for reliability in hosted environments.")
+    quick_default = True
+    lite = is_lite_env()
+    if lite:
+        st.info("Low-memory environment detected. Enabling lite training mode (tiny models, fewer points).")
+    quick = st.checkbox("Quick demo training (recommended)", value=quick_default)
+    # Cap aggressively in lite mode
+    max_pts = 2000 if not lite else 200
+    default_pts = 200 if not lite else 50
+    num_points = st.number_input("num_points for mixer (when generating)", min_value=10, max_value=max_pts, value=default_pts)
     num_av = st.number_input("num_av for mixer", min_value=1, max_value=10, value=1)
 
     colA, colB = st.columns(2)
@@ -172,27 +204,35 @@ elif tab == "Training models":
                 cell_types = CellTypes.load(CELL_TYPES_CFG)
                 # load small data as in previous step
                 if quick and os.path.exists(DEMO_CELLS_EXPR):
-                    cells_expr = pd.read_csv(DEMO_CELLS_EXPR, sep='\t', index_col=0)
-                    cancer_expr = pd.read_csv(DEMO_TUMOR_EXPR, sep='\t', index_col=0)
+                    cells_expr = load_tsv(DEMO_CELLS_EXPR)
+                    cancer_expr = load_tsv(DEMO_TUMOR_EXPR)
                     cells_annot = pd.read_csv(DEMO_CELLS_ANNOT, sep='\t', index_col=0) if os.path.exists(DEMO_CELLS_ANNOT) else pd.DataFrame(index=cells_expr.columns)
                     cancer_annot = pd.read_csv(DEMO_TUMOR_ANNOT, sep='\t', index_col=0) if os.path.exists(DEMO_TUMOR_ANNOT) else pd.DataFrame(index=cancer_expr.columns)
                 else:
-                    cells_expr = pd.read_csv(CELLS_EXPR, sep='\t', index_col=0).iloc[:, :200]
-                    cancer_expr = pd.read_csv(TUMOR_EXPR, sep='\t', index_col=0).iloc[:, :200]
+                    cells_expr = load_tsv(CELLS_EXPR).iloc[:, :200]
+                    cancer_expr = load_tsv(TUMOR_EXPR).iloc[:, :200]
                     cells_annot = pd.read_csv(CELLS_ANNOT, sep='\t', index_col=0).iloc[:200, :]
                     cancer_annot = pd.read_csv(TUMOR_ANNOT, sep='\t', index_col=0).iloc[:200, :]
             except Exception:
                 st.warning("Could not load repo files quickly; using demo subsets (deterministic).")
-                cells_expr = pd.read_csv(DEMO_CELLS_EXPR, sep='\t', index_col=0)
-                cancer_expr = pd.read_csv(DEMO_TUMOR_EXPR, sep='\t', index_col=0)
+                cells_expr = load_tsv(DEMO_CELLS_EXPR)
+                cancer_expr = load_tsv(DEMO_TUMOR_EXPR)
                 cells_annot = pd.read_csv(DEMO_CELLS_ANNOT, sep='\t', index_col=0) if os.path.exists(DEMO_CELLS_ANNOT) else pd.DataFrame(index=cells_expr.columns)
                 cancer_annot = pd.read_csv(DEMO_TUMOR_ANNOT, sep='\t', index_col=0) if os.path.exists(DEMO_TUMOR_ANNOT) else pd.DataFrame(index=cancer_expr.columns)
 
+            # further cap points in lite mode to avoid OOM
+            eff_points = int(min(num_points, 50 if lite else num_points))
             mixer = Mixer(cell_types=cell_types,
                           cells_expr=cells_expr, cells_annot=cells_annot,
                           tumor_expr=cancer_expr, tumor_annot=cancer_annot,
-                          num_av=int(num_av), num_points=int(num_points))
-            model = DeconvolutionModel(cell_types)
+                          num_av=int(num_av), num_points=eff_points)
+            # Use tiny LightGBM params in lite environments
+            if lite and os.path.exists(LITE_BP1) and os.path.exists(LITE_BP2):
+                model = DeconvolutionModel(cell_types,
+                                           boosting_params_first_step=LITE_BP1,
+                                           boosting_params_second_step=LITE_BP2)
+            else:
+                model = DeconvolutionModel(cell_types)
             # suppress stdout/stderr during training
             stdout_cm, stderr_cm = quiet()
             try:
@@ -201,20 +241,18 @@ elif tab == "Training models":
                 st.success("Quick training pipeline finished (models stored in-memory)")
                 st.session_state["model"] = model
                 st.session_state["cell_types"] = cell_types
+                # free up memory used by training dataframes
+                del cells_expr, cancer_expr, cells_annot, cancer_annot, mixer
+                gc.collect()
             except Exception as e:
                 st.error(f"Quick training failed: {e}")
 
             st.write("You can now run Validation step to predict on sample data.")
 
-    if colB.button("Load precomputed model from disk"):
-        if os.path.exists(PRECOMP_MODEL):
-            try:
-                st.session_state["model"] = joblib.load(PRECOMP_MODEL)
-                st.info("Loaded precomputed model from data/precomputed/model.joblib")
-            except Exception as e:
-                st.error(f"Failed to load precomputed model: {e}")
-        else:
-            st.warning("data/precomputed/model.joblib not found. See data/precomputed/README.md to generate.")
+    # Note: Loading a precomputed model from disk is intentionally disabled in the hosted demo
+    # because large model files can fail to load reliably in constrained/cloud environments.
+    # To use a precomputed model, copy `data/precomputed/model.joblib` into the repo locally
+    # and run the notebook workflow instead.
 
 elif tab == "Validation":
     st.header("4. Validation")
@@ -267,15 +305,8 @@ elif tab == "Validation":
             if val_expr is not None and cytof_df is not None:
                 if st.button("Run prediction and plot (quick)"):
                     model_obj = st.session_state.get("model")
-                    if model_obj is None and os.path.exists(PRECOMP_MODEL):
-                        try:
-                            model_obj = joblib.load(PRECOMP_MODEL)
-                            st.info("Using precomputed model from disk.")
-                        except Exception as e:
-                            st.error(f"Failed to load precomputed model: {e}")
-                            model_obj = None
                     if model_obj is None:
-                        st.error("No model available. Train (quick) or load a precomputed model first.")
+                        st.error("No model available in memory. Please run 'Run quick training pipeline' in the Training models tab to create a model for prediction.")
                     else:
                         try:
                             # limit columns for speed if huge
@@ -325,16 +356,56 @@ elif tab == "Validation":
             st.info("No metrics found at data/precomputed/metrics.csv. See data/precomputed/README.md to generate.")
 
         # Show precomputed plots if present
-        if os.path.isdir(PRECOMP_PLOTS_DIR):
+        if os.path.exists(PRECOMP_PREDS) and os.path.exists(VALIDATION_CYTOF):
+            st.subheader("Precomputed visualization")
+            try:
+                preds = pd.read_csv(PRECOMP_PREDS, sep='\t', index_col=0)
+                cytof_df = pd.read_csv(VALIDATION_CYTOF, sep='\t', index_col=0)
+                
+                # Align cytof to prediction columns
+                cytof_aligned = cytof_df.loc[preds.index.intersection(cytof_df.index), 
+                                           preds.columns.intersection(cytof_df.columns)]
+                
+                # Generate notebook-style plots
+                # All cells in one scatter
+                fig1, ax1 = plt.subplots(figsize=(12, 8))
+                print_all_cells_in_one(preds, cytof_aligned, ax=ax1, pallete=cells_p,
+                                     title="Precomputed Results", min_xlim=0, min_ylim=0)
+                st.pyplot(fig1)
+                
+                # Per-cell matrix of scatters
+                st.subheader("Per-cell correlation matrix")
+                axs = print_cell_matras(preds, cytof_aligned, pallete=cells_p, colors_by='index',
+                                      title='', sub_title_font=18, fontsize_title=22,
+                                      subplot_ncols=4, ticks_size=12, wspace=0.4, hspace=0.5,
+                                      min_xlim=0, min_ylim=0)
+                st.pyplot(plt.gcf())
+                
+                # Save plots for future use
+                plt.figure(fig1.number)
+                plt.savefig(os.path.join(PRECOMP_PLOTS_DIR, 'all_cells_scatter.png'), bbox_inches='tight')
+                plt.figure(axs[0,0].figure.number)
+                plt.savefig(os.path.join(PRECOMP_PLOTS_DIR, 'cell_correlation_matrix.png'), bbox_inches='tight')
+                
+            except Exception as e:
+                st.error(f"Could not generate precomputed plots: {e}")
+                
+                # Fallback to saved PNGs if available
+                pngs = sorted(glob.glob(os.path.join(PRECOMP_PLOTS_DIR, "*.png")))
+                if pngs:
+                    st.subheader("Saved precomputed plots")
+                    for p in pngs:
+                        st.image(p, caption=os.path.basename(p), use_column_width=True)
+                
+        elif os.path.isdir(PRECOMP_PLOTS_DIR):
+            # Fallback to just showing saved plots
             pngs = sorted(glob.glob(os.path.join(PRECOMP_PLOTS_DIR, "*.png")))
             if pngs:
                 st.subheader("Precomputed plots")
                 for p in pngs:
                     st.image(p, caption=os.path.basename(p), use_column_width=True)
             else:
-                st.write("No PNGs found under data/precomputed/plots/ yet.")
-        else:
-            st.write("data/precomputed/plots/ directory not present.")
+                st.write("No precomputed plots available yet. Run prediction with the model first.")
 
         # Show precomputed predictions if present
         if os.path.exists(PRECOMP_PREDS):
