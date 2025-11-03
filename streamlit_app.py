@@ -201,9 +201,7 @@ elif tab == "Training models":
     num_points = st.number_input("num_points for mixer (when generating)", min_value=10, max_value=max_pts, value=default_pts)
     num_av = st.number_input("num_av for mixer", min_value=1, max_value=10, value=1)
 
-    colA, colB = st.columns(2)
-
-    if colA.button("Run quick training pipeline"):
+    if st.button("Run quick training pipeline"):
         # avoid concurrent trainings that can OOM small instances
         if not TRAIN_LOCK.acquire(blocking=False):
             st.warning("Another training is in progress. Please wait and try again.")
@@ -268,11 +266,7 @@ elif tab == "Training models":
                 except Exception:
                     pass
 
-            # Show next step message after training completes
-            if st.session_state.get("model") is not None:
-                st.success("✅ Model ready! You can now run Validation step to predict on sample data.")
-
-    # Guidance about precomputed models and running full training locally
+    # Show guidance always visible
     with st.expander("ℹ️ About training in this demo"):
         st.markdown(
             "- **Lite mode** (enabled on Render): Uses tiny LightGBM models (~100 estimators) and caps num_points to ~50 to fit 512MB RAM.\n"
