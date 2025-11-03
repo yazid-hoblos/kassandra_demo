@@ -12,6 +12,7 @@ import sys
 import pickle
 import warnings
 import gc
+import threading
 
 from core.cell_types import CellTypes
 from core.mixer import Mixer
@@ -64,6 +65,9 @@ def is_lite_env() -> bool:
     """Detect low-memory environment (e.g., Render free) and force lite mode."""
     # Render sets a few env vars; also allow explicit opt-in via KASSANDRA_LITE
     return bool(os.environ.get("KASSANDRA_LITE") or os.environ.get("RENDER") or os.environ.get("RENDER_EXTERNAL_URL"))
+
+# Global lock to serialize training across concurrent sessions/process threads
+TRAIN_LOCK = threading.Lock()
 
 
 @st.cache_data(show_spinner=False)
@@ -182,7 +186,7 @@ elif tab == "Artificial Transcriptomes":
     except FileNotFoundError as e:
         st.error(f"Cell types config or data missing: {e}")
 
-elif tab == "Model Training":
+elif tab == "Training models":
     st.header("3. Training models")
     st.write("Train lightweight models on generated pseudobulks (quick demo).")
     quick_default = True
@@ -199,55 +203,71 @@ elif tab == "Model Training":
     colA, colB = st.columns(2)
 
     if colA.button("Run quick training pipeline"):
-        with st.spinner("Running quick pipeline: generate -> train (lightweight)..."):
+        # avoid concurrent trainings that can OOM small instances
+        if not TRAIN_LOCK.acquire(blocking=False):
+            st.warning("Another training is in progress. Please wait and try again.")
+        else:
             try:
-                cell_types = CellTypes.load(CELL_TYPES_CFG)
-                # load small data as in previous step
-                if quick and os.path.exists(DEMO_CELLS_EXPR):
-                    cells_expr = load_tsv(DEMO_CELLS_EXPR)
-                    cancer_expr = load_tsv(DEMO_TUMOR_EXPR)
-                    cells_annot = pd.read_csv(DEMO_CELLS_ANNOT, sep='\t', index_col=0) if os.path.exists(DEMO_CELLS_ANNOT) else pd.DataFrame(index=cells_expr.columns)
-                    cancer_annot = pd.read_csv(DEMO_TUMOR_ANNOT, sep='\t', index_col=0) if os.path.exists(DEMO_TUMOR_ANNOT) else pd.DataFrame(index=cancer_expr.columns)
-                else:
-                    cells_expr = load_tsv(CELLS_EXPR).iloc[:, :200]
-                    cancer_expr = load_tsv(TUMOR_EXPR).iloc[:, :200]
-                    cells_annot = pd.read_csv(CELLS_ANNOT, sep='\t', index_col=0).iloc[:200, :]
-                    cancer_annot = pd.read_csv(TUMOR_ANNOT, sep='\t', index_col=0).iloc[:200, :]
-            except Exception:
-                st.warning("Could not load repo files quickly; using demo subsets (deterministic).")
-                cells_expr = load_tsv(DEMO_CELLS_EXPR)
-                cancer_expr = load_tsv(DEMO_TUMOR_EXPR)
-                cells_annot = pd.read_csv(DEMO_CELLS_ANNOT, sep='\t', index_col=0) if os.path.exists(DEMO_CELLS_ANNOT) else pd.DataFrame(index=cells_expr.columns)
-                cancer_annot = pd.read_csv(DEMO_TUMOR_ANNOT, sep='\t', index_col=0) if os.path.exists(DEMO_TUMOR_ANNOT) else pd.DataFrame(index=cancer_expr.columns)
+                with st.spinner("Running quick pipeline: generate -> train (lightweight)..."):
+                    try:
+                        cell_types = CellTypes.load(CELL_TYPES_CFG)
+                        # In lite mode, restrict math backend threads to reduce RAM/CPU
+                        if lite:
+                            os.environ["OMP_NUM_THREADS"] = "1"
+                            os.environ["OPENBLAS_NUM_THREADS"] = "1"
+                            os.environ["MKL_NUM_THREADS"] = "1"
+                            os.environ["NUMEXPR_NUM_THREADS"] = "1"
+                        # load small data as in previous step
+                        if quick and os.path.exists(DEMO_CELLS_EXPR):
+                            cells_expr = load_tsv(DEMO_CELLS_EXPR)
+                            cancer_expr = load_tsv(DEMO_TUMOR_EXPR)
+                            cells_annot = pd.read_csv(DEMO_CELLS_ANNOT, sep='\t', index_col=0) if os.path.exists(DEMO_CELLS_ANNOT) else pd.DataFrame(index=cells_expr.columns)
+                            cancer_annot = pd.read_csv(DEMO_TUMOR_ANNOT, sep='\t', index_col=0) if os.path.exists(DEMO_TUMOR_ANNOT) else pd.DataFrame(index=cancer_expr.columns)
+                        else:
+                            cells_expr = load_tsv(CELLS_EXPR).iloc[:, :200]
+                            cancer_expr = load_tsv(TUMOR_EXPR).iloc[:, :200]
+                            cells_annot = pd.read_csv(CELLS_ANNOT, sep='\t', index_col=0).iloc[:200, :]
+                            cancer_annot = pd.read_csv(TUMOR_ANNOT, sep='\t', index_col=0).iloc[:200, :]
+                    except Exception:
+                        st.warning("Could not load repo files quickly; using demo subsets (deterministic).")
+                        cells_expr = load_tsv(DEMO_CELLS_EXPR)
+                        cancer_expr = load_tsv(DEMO_TUMOR_EXPR)
+                        cells_annot = pd.read_csv(DEMO_CELLS_ANNOT, sep='\t', index_col=0) if os.path.exists(DEMO_CELLS_ANNOT) else pd.DataFrame(index=cells_expr.columns)
+                        cancer_annot = pd.read_csv(DEMO_TUMOR_ANNOT, sep='\t', index_col=0) if os.path.exists(DEMO_TUMOR_ANNOT) else pd.DataFrame(index=cancer_expr.columns)
 
-            # further cap points in lite mode to avoid OOM
-            eff_points = int(min(num_points, 50 if lite else num_points))
-            mixer = Mixer(cell_types=cell_types,
-                          cells_expr=cells_expr, cells_annot=cells_annot,
-                          tumor_expr=cancer_expr, tumor_annot=cancer_annot,
-                          num_av=int(num_av), num_points=eff_points)
-            # Use tiny LightGBM params in lite environments
-            if lite and os.path.exists(LITE_BP1) and os.path.exists(LITE_BP2):
-                model = DeconvolutionModel(cell_types,
-                                           boosting_params_first_step=LITE_BP1,
-                                           boosting_params_second_step=LITE_BP2)
-            else:
-                model = DeconvolutionModel(cell_types)
-            # suppress stdout/stderr during training
-            stdout_cm, stderr_cm = quiet()
-            try:
-                with stdout_cm, stderr_cm:
-                    model.fit(mixer)
-                st.success("Quick training pipeline finished (models stored in-memory)")
-                st.session_state["model"] = model
-                st.session_state["cell_types"] = cell_types
-                # free up memory used by training dataframes
-                del cells_expr, cancer_expr, cells_annot, cancer_annot, mixer
-                gc.collect()
-            except Exception as e:
-                st.error(f"Quick training failed: {e}")
+                    # further cap points in lite mode to avoid OOM
+                    eff_points = int(min(num_points, 50 if lite else num_points))
+                    mixer = Mixer(cell_types=cell_types,
+                                  cells_expr=cells_expr, cells_annot=cells_annot,
+                                  tumor_expr=cancer_expr, tumor_annot=cancer_annot,
+                                  num_av=int(num_av), num_points=eff_points)
+                    # Use tiny LightGBM params in lite environments
+                    if lite and os.path.exists(LITE_BP1) and os.path.exists(LITE_BP2):
+                        model = DeconvolutionModel(cell_types,
+                                                   boosting_params_first_step=LITE_BP1,
+                                                   boosting_params_second_step=LITE_BP2)
+                    else:
+                        model = DeconvolutionModel(cell_types)
+                    # suppress stdout/stderr during training
+                    stdout_cm, stderr_cm = quiet()
+                    try:
+                        with stdout_cm, stderr_cm:
+                            model.fit(mixer)
+                        st.success("Quick training pipeline finished (models stored in-memory)")
+                        st.session_state["model"] = model
+                        st.session_state["cell_types"] = cell_types
+                        # free up memory used by training dataframes
+                        del cells_expr, cancer_expr, cells_annot, cancer_annot, mixer
+                        gc.collect()
+                    except Exception as e:
+                        st.error(f"Quick training failed: {e}")
 
-            st.write("You can now run Validation step to predict on sample data.")
+                st.write("You can now run Validation step to predict on sample data.")
+            finally:
+                try:
+                    TRAIN_LOCK.release()
+                except Exception:
+                    pass
 
     # Note: Loading a precomputed model from disk is intentionally disabled in the hosted demo
     # because large model files can fail to load reliably in constrained/cloud environments.
@@ -328,12 +348,15 @@ elif tab == "Validation":
                             print_all_cells_in_one(preds, cytof_aligned, ax=ax1, pallete=cells_p,
                                                    title=choice, min_xlim=0, min_ylim=0)
                             st.pyplot(fig1)
+                            plt.close(fig1)
                             # Per-cell matrix of scatters
                             axs = print_cell_matras(preds, cytof_aligned, pallete=cells_p, colors_by='index',
                                                     title='', sub_title_font=18, fontsize_title=22,
                                                     subplot_ncols=4, ticks_size=12, wspace=0.4, hspace=0.5,
                                                     min_xlim=0, min_ylim=0)
-                            st.pyplot(plt.gcf())
+                            fig2 = plt.gcf()
+                            st.pyplot(fig2)
+                            plt.close(fig2)
                         except Exception as e:
                             st.error(f"Prediction or plotting failed: {e}")
     else:
@@ -373,6 +396,7 @@ elif tab == "Validation":
                 print_all_cells_in_one(preds, cytof_aligned, ax=ax1, pallete=cells_p,
                                      title="Precomputed Results", min_xlim=0, min_ylim=0)
                 st.pyplot(fig1)
+                plt.close(fig1)
                 
                 # Per-cell matrix of scatters
                 st.subheader("Per-cell correlation matrix")
@@ -380,12 +404,14 @@ elif tab == "Validation":
                                       title='', sub_title_font=18, fontsize_title=22,
                                       subplot_ncols=4, ticks_size=12, wspace=0.4, hspace=0.5,
                                       min_xlim=0, min_ylim=0)
-                st.pyplot(plt.gcf())
+                fig2 = plt.gcf()
+                st.pyplot(fig2)
+                plt.close(fig2)
             except Exception as e:
                 st.error(f"Could not generate precomputed plots: {e}")
             
-            # Try to save plots for future use, but don't fail UI if saving fails
-            if 'fig1' in locals():
+            # Try to save plots for future use (skip in lite mode). Don't fail UI if saving fails
+            if 'fig1' in locals() and not is_lite_env():
                 try:
                     os.makedirs(PRECOMP_PLOTS_DIR, exist_ok=True)
                     with contextlib.suppress(Exception):
