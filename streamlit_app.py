@@ -68,6 +68,7 @@ def is_lite_env() -> bool:
 
 # Global lock to serialize training across concurrent sessions/process threads
 TRAIN_LOCK = threading.Lock()
+PLOTS_LOCK = threading.Lock()
 
 
 @st.cache_data(show_spinner=False)
@@ -381,48 +382,44 @@ elif tab == "Validation":
         # Show precomputed plots if present
         if os.path.exists(PRECOMP_PREDS) and os.path.exists(VALIDATION_CYTOF):
             st.subheader("Precomputed visualization")
-            # Load and display plots
-            try:
-                preds = pd.read_csv(PRECOMP_PREDS, sep='\t', index_col=0)
-                cytof_df = pd.read_csv(VALIDATION_CYTOF, sep='\t', index_col=0)
-                
-                # Align cytof to prediction columns
-                cytof_aligned = cytof_df.loc[preds.index.intersection(cytof_df.index), 
-                                           preds.columns.intersection(cytof_df.columns)]
-                
-                # Generate notebook-style plots
-                # All cells in one scatter
-                fig1, ax1 = plt.subplots(figsize=(12, 8))
-                print_all_cells_in_one(preds, cytof_aligned, ax=ax1, pallete=cells_p,
-                                     title="Precomputed Results", min_xlim=0, min_ylim=0)
-                st.pyplot(fig1)
-                plt.close(fig1)
-                
-                # Per-cell matrix of scatters
-                st.subheader("Per-cell correlation matrix")
-                axs = print_cell_matras(preds, cytof_aligned, pallete=cells_p, colors_by='index',
-                                      title='', sub_title_font=18, fontsize_title=22,
-                                      subplot_ncols=4, ticks_size=12, wspace=0.4, hspace=0.5,
-                                      min_xlim=0, min_ylim=0)
-                fig2 = plt.gcf()
-                st.pyplot(fig2)
-                plt.close(fig2)
-            except Exception as e:
-                st.error(f"Could not generate precomputed plots: {e}")
-            
-            # Try to save plots for future use (skip in lite mode). Don't fail UI if saving fails
-            if 'fig1' in locals() and not is_lite_env():
-                try:
-                    os.makedirs(PRECOMP_PLOTS_DIR, exist_ok=True)
-                    with contextlib.suppress(Exception):
-                        plt.figure(fig1.number)
-                        plt.savefig(os.path.join(PRECOMP_PLOTS_DIR, 'all_cells_scatter.png'), bbox_inches='tight')
-                    with contextlib.suppress(Exception):
-                        target_fig = axs[0,0].figure if hasattr(axs, '__getitem__') else plt.gcf()
-                        plt.figure(target_fig.number)
-                        plt.savefig(os.path.join(PRECOMP_PLOTS_DIR, 'cell_correlation_matrix.png'), bbox_inches='tight')
-                except Exception as e:
-                    st.info(f"Displayed plots but couldn't save to {PRECOMP_PLOTS_DIR}: {e}")
+            render_plots = st.button("Render precomputed plots", key="render_precomp_plots")
+            if render_plots:
+                if not PLOTS_LOCK.acquire(blocking=False):
+                    st.warning("Another plot render is in progress. Please wait and try again.")
+                else:
+                    try:
+                        with st.spinner("Rendering precomputed plots..."):
+                            preds = load_tsv(PRECOMP_PREDS)
+                            cytof_df = load_tsv(VALIDATION_CYTOF)
+
+                            # Align cytof to prediction columns (copy to ensure safe slicing)
+                            idx = preds.index.intersection(cytof_df.index)
+                            cols = preds.columns.intersection(cytof_df.columns)
+                            cytof_aligned = cytof_df.loc[idx, cols].copy()
+
+                            # All cells in one scatter
+                            fig1, ax1 = plt.subplots(figsize=(12, 8))
+                            print_all_cells_in_one(preds, cytof_aligned, ax=ax1, pallete=cells_p,
+                                                 title="Precomputed Results", min_xlim=0, min_ylim=0)
+                            st.pyplot(fig1)
+                            plt.close(fig1)
+
+                            # Per-cell matrix of scatters
+                            st.subheader("Per-cell correlation matrix")
+                            axs = print_cell_matras(preds, cytof_aligned, pallete=cells_p, colors_by='index',
+                                                  title='', sub_title_font=18, fontsize_title=22,
+                                                  subplot_ncols=4, ticks_size=12, wspace=0.4, hspace=0.5,
+                                                  min_xlim=0, min_ylim=0)
+                            fig2 = plt.gcf()
+                            st.pyplot(fig2)
+                            plt.close(fig2)
+                    except Exception as e:
+                        st.error(f"Could not generate precomputed plots: {e}")
+                    finally:
+                        try:
+                            PLOTS_LOCK.release()
+                        except Exception:
+                            pass
                 
         elif os.path.isdir(PRECOMP_PLOTS_DIR):
             # Fallback to just showing saved plots
