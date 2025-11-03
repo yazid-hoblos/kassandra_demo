@@ -187,7 +187,7 @@ elif tab == "Artificial Transcriptomes":
     except FileNotFoundError as e:
         st.error(f"Cell types config or data missing: {e}")
 
-elif tab == "Training models":
+elif tab == "Model Training":
     st.header("3. Training models")
     st.write("Train lightweight models on generated pseudobulks (quick demo).")
     quick_default = True
